@@ -9,4 +9,6 @@ public class ProxyConfig
     public required string DestinationHost { get; set; }
     public required int DestinationPort { get; set; }
     public int ProxyBindPort { get; set; }
+    public string CertificateStore { get; set; } = "CurrentUser";
+    public bool VerboseErrors { get; set; }
 }

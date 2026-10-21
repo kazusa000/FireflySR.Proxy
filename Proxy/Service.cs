@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Security;
 using System.Text;
 using System.Threading.Tasks;
+using System.Security.Cryptography.X509Certificates;
 using Titanium.Web.Proxy;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Models;
@@ -17,20 +18,30 @@ namespace FireflySR.Proxy
         private readonly string _targetRedirectHost;
         private readonly int _targetRedirectPort;
 
-        public ProxyService(string targetRedirectHost, int targetRedirectPort, ProxyConfig conf)
+        public ProxyService(string targetRedirectHost, int targetRedirectPort, ProxyConfig conf, X509Certificate2 certificate)
         {
             _conf = conf ?? throw new ArgumentNullException(nameof(conf));
-            _webProxyServer = new ProxyServer();
-            _webProxyServer.CertificateManager.EnsureRootCertificate();
+            _webProxyServer = new ProxyServer(userTrustRootCertificate: false);
+            _webProxyServer.ForwardToUpstreamGateway = false;
+            _webProxyServer.EnableTcpServerConnectionPrefetch = false;
+            _webProxyServer.EnableHttp2 = false;
+            _webProxyServer.ExceptionFunc = ex => Logger.Error(_conf.VerboseErrors ? ex.ToString() : ex.GetType().Name);
+            _webProxyServer.CertificateManager.RootCertificate = certificate;
 
             _webProxyServer.BeforeRequest += BeforeRequest;
+            _webProxyServer.BeforeResponse += (_, args) =>
+            {
+                if (_conf.VerboseErrors && args.UserData is string route)
+                    Logger.Info($"RESPONSE {route} status={args.HttpClient.Response.StatusCode}");
+                return Task.CompletedTask;
+            };
             _webProxyServer.ServerCertificateValidationCallback += OnCertValidation;
 
             _targetRedirectHost = targetRedirectHost;
             _targetRedirectPort = targetRedirectPort;
 
             int port = conf.ProxyBindPort == 0 ? Random.Shared.Next(10000, 60000) : conf.ProxyBindPort;
-            SetEndPoint(new ExplicitProxyEndPoint(IPAddress.Any, port, true));
+            SetEndPoint(new ExplicitProxyEndPoint(IPAddress.Loopback, port, true));
         }
 
         private void SetEndPoint(ExplicitProxyEndPoint explicitEP)
@@ -38,13 +49,9 @@ namespace FireflySR.Proxy
             explicitEP.BeforeTunnelConnectRequest += BeforeTunnelConnectRequest;
 
             _webProxyServer.AddEndPoint(explicitEP);
-            _webProxyServer.Start();
+            _webProxyServer.Start(changeSystemProxySettings: false);
 
-            if (OperatingSystem.IsWindows())
-            {
-                _webProxyServer.SetAsSystemHttpProxy(explicitEP);
-                _webProxyServer.SetAsSystemHttpsProxy(explicitEP);
-            }
+            // Lease owns system settings; the library must never auto-reset them.
         }
 
         public void Shutdown()
@@ -57,6 +64,7 @@ namespace FireflySR.Proxy
         {
             string hostname = args.HttpClient.Request.RequestUri.Host;
             args.DecryptSsl = ShouldRedirect(hostname);
+            if (args.DecryptSsl && _conf.VerboseErrors) Logger.Info("CONNECT " + hostname);
 
             return Task.CompletedTask;
         }
@@ -87,7 +95,7 @@ namespace FireflySR.Proxy
         private Task BeforeRequest(object sender, SessionEventArgs args)
         {
             string hostname = args.HttpClient.Request.RequestUri.Host;
-            if (ShouldRedirect(hostname) || ShouldForceRedirect(args.HttpClient.Request.RequestUri.AbsolutePath))
+            if (ShouldRedirect(hostname))
             {
                 string requestUrl = args.HttpClient.Request.RequestUri.ToString();
                 Uri local = new Uri($"http://{_targetRedirectHost}:{_targetRedirectPort}/");
@@ -103,7 +111,7 @@ namespace FireflySR.Proxy
 
                 if (ShouldBlock(builtUrl))
                 {
-                    Logger.Blocked(requestUrl);
+                    Logger.Blocked(hostname + builtUrl.AbsolutePath);
                     args.Respond(new Titanium.Web.Proxy.Http.Response(Encoding.UTF8.GetBytes("Access denied"))
                     {
                         StatusCode = 404,
@@ -113,9 +121,10 @@ namespace FireflySR.Proxy
                 }
 
                 args.HttpClient.Request.Url = replacedUrl;
+                args.UserData = hostname + builtUrl.AbsolutePath;
 
-                Logger.Redirecting($"from: {requestUrl}");
-                Logger.Redirecting($"to:   {replacedUrl}");
+                // Query strings and bodies may contain login credentials.
+                Logger.Redirecting($"{args.HttpClient.Request.Method} {hostname}{builtUrl.AbsolutePath} -> 127.0.0.1:{_targetRedirectPort}");
             }
 
             return Task.CompletedTask;
@@ -128,7 +137,7 @@ namespace FireflySR.Proxy
 
             foreach (string domain in _conf.AlwaysIgnoreDomains)
             {
-                if (hostname.EndsWith(domain))
+                if (MatchesDomain(hostname, domain))
                 {
                     return false;
                 }
@@ -136,11 +145,17 @@ namespace FireflySR.Proxy
 
             foreach (string domain in _conf.RedirectDomains)
             {
-                if (hostname.EndsWith(domain))
+                if (MatchesDomain(hostname, domain))
                     return true;
             }
 
             return false;
+        }
+
+        internal static bool MatchesDomain(string host, string domain)
+        {
+            string suffix = domain.TrimStart('.');
+            return host.Equals(suffix, StringComparison.OrdinalIgnoreCase) || host.EndsWith("." + suffix, StringComparison.OrdinalIgnoreCase);
         }
     }
 }

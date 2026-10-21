@@ -1,128 +1,60 @@
-﻿using Microsoft.Win32;
 using System.Diagnostics;
-using System.Net;
 using System.Text.Json;
 using FireflySR.Proxy.Common;
 
-namespace FireflySR.Proxy
+namespace FireflySR.Proxy;
+
+internal class Program
 {
-    internal class Program
+    static async Task<int> Main(string[] args)
     {
-        private const string Title = "[ FIREFLY SR | PROXY ]";
-        private const string ConfigPath = "config.json";
-        private const string GuardianPath = "tool/Guardian.exe";
-
-        private static ProxyService s_proxyService = null!;
-        private static bool s_clearupd = false;
-
-        static async Task Main(string[] args)
+        Logger.Init("INFO", "Railway local proxy");
+        Lease? lease = null;
+        ProxyService? service = null;
+        FileStream? ownership = null;
+        try
         {
-            Logger.Init("INFO", Title);
-			AppDomain.CurrentDomain.ProcessExit += (_, _) => Logger.Close();
-
-            if (!File.Exists(ConfigPath))
+            if (args.Length != 5) throw new ArgumentException("Usage: Proxy config state-directory owner-pid server-pid stop-server(0|1)");
+            var conf = JsonSerializer.Deserialize<ProxyConfig>(File.ReadAllText(args[0])) ?? throw new Exception("Invalid config");
+            Directory.CreateDirectory(args[1]);
+            Directory.SetCurrentDirectory(Path.GetFullPath(args[1]));
+            ownership = new FileStream("session.lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            if (File.Exists("lease.json") && !File.Exists("stopped")) Lease.Recover("lease.json");
+            foreach (var f in new[] { "ready", "stopped", "stop", "guardian.ready", "trust-watch.ready", "trust.stopped" }) File.Delete(f);
+            lease = Lease.Create(conf.ProxyBindPort, int.Parse(args[2]), int.Parse(args[3]), args[4] == "1", conf.CertificateStore);
+            lease.Save("lease.json"); // durable recovery recipe BEFORE any trust/network mutation
+            var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+            start.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "..", "..", "Guardian", new DirectoryInfo(AppContext.BaseDirectory).Name, "Guardian.dll"));
+            start.ArgumentList.Add(Path.GetFullPath("lease.json"));
+            using var guardian = Process.Start(start) ?? throw new Exception("Guardian start failed");
+            for (int i = 0; !File.Exists("guardian.ready"); i++)
             {
-                Logger.Error("Missing config.json. Please create and configure it properly.\nPress ENTER to exit...");
-                Console.ReadLine();
-                Environment.Exit(1);
+                if (guardian.HasExited || i > 100) throw new Exception("Guardian not ready");
+                await Task.Delay(100);
             }
-
-            ProxyConfig? conf = null;
-            try
-            {
-                conf = JsonSerializer.Deserialize<ProxyConfig>(File.ReadAllText(ConfigPath));
-            }
-            catch (Exception ex)
-            {
-                Logger.Hint($"Failed to parse config.json: {ex.Message}\nPress ENTER to exit...");
-                Console.ReadLine();
-                Environment.Exit(1);
-            }
-
-            if (conf == null)
-            {
-                Logger.Hint("Invalid config.json format. Please fix or regenerate.\nPress ENTER to exit...");
-                Console.ReadLine();
-                Environment.Exit(1);
-            }
-
-            CheckProxy();
-
-            s_proxyService = new ProxyService(conf.DestinationHost, conf.DestinationPort, conf);
-
-            _ = Task.Run(WatchGuardianAsync);
-
-            AppDomain.CurrentDomain.ProcessExit += (_, _) => OnProcessExit();
-            Console.CancelKeyPress += (_, _) => OnProcessExit();
-
-            await Task.Delay(-1);
+            service = new ProxyService(conf.DestinationHost, conf.DestinationPort, conf, lease.LoadCertificate());
+            lease.Activate();
+            var helper = JsonSerializer.Deserialize<ProcessRef>(File.ReadAllText("client-helper.json")) ?? throw new Exception("Client helper missing");
+            File.WriteAllText("ready", Environment.ProcessId.ToString());
+            Logger.Info($"READY loopback=127.0.0.1:{conf.ProxyBindPort}");
+            using var cancel = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancel.Cancel(); };
+            while (!cancel.IsCancellationRequested && !File.Exists("stop") && lease.Owner.Alive && lease.Server.Alive && helper.Alive && !guardian.HasExited)
+                await Task.Delay(250);
+            return 0;
         }
-
-        private static async Task WatchGuardianAsync()
+        catch (Exception ex) { Logger.Error(ex.ToString()); return 1; }
+        finally
         {
-            var proc = StartGuardian();
-            if (proc == null)
+            if (lease != null) File.WriteAllText("stop", "proxy ended");
+            service?.Shutdown();
+            if (lease != null)
             {
-                Logger.Fail("Guardian start failed. Your proxy settings may not recover after closing.");
-                return;
+                try { Lease.Recover("lease.json", lease.Proxy); }
+                catch (Exception ex) { Logger.Error($"Recovery failed; lease retained: {ex}"); }
             }
-
-            while (!proc.HasExited)
-                await Task.Delay(1000);
-
-            Logger.Info("! Guardian exit");
-            OnProcessExit();
-            Console.ReadLine();
-            Environment.Exit(0);
-        }
-
-        private static Process? StartGuardian()
-        {
-            if (!OperatingSystem.IsWindows()) return null;
-
-            try
-            {
-                return Process.Start(new ProcessStartInfo(GuardianPath, $"{Environment.ProcessId}")
-                {
-                    UseShellExecute = false,
-                });
-            }
-            catch (Exception ex)
-            {
-                Logger.Warning($"Failed to start Guardian: {ex.Message}");
-                return null;
-            }
-        }
-
-        private static void OnProcessExit()
-        {
-            if (s_clearupd) return;
-            s_proxyService?.Shutdown();
-            s_clearupd = true;
-        }
-
-        private static void CheckProxy()
-        {
-            try
-            {
-                if (GetProxyInfo() is string proxyInfo)
-                {
-                    Logger.Info($"Your system proxy {proxyInfo}");
-                    Logger.Warning("It seems you are using other proxy software.\nClose them first.\nPress any key to continue if resolved.");
-                    Console.ReadKey();
-                }
-            }
-            catch (NullReferenceException) { }
-        }
-
-        private static string? GetProxyInfo()
-        {
-            try
-            {
-                var proxyUri = WebRequest.GetSystemWebProxy()?.GetProxy(new Uri(""));
-                return proxyUri is { Host: not "" } ? $"{proxyUri.Host}:{proxyUri.Port}" : null;
-            }
-            catch { return null; }
+            ownership?.Dispose();
+            Logger.Close();
         }
     }
 }
