@@ -2,12 +2,6 @@
   "version": 1,
   "dependencies": {
     "net9.0": {
-      "Microsoft.NET.ILLink.Tasks": {
-        "type": "Direct",
-        "requested": "[9.0.21, )",
-        "resolved": "9.0.21",
-        "contentHash": "ryionTSVk0ZU5/gW6r6Kh6LxvUzuF8HIcO0CLHoHhn7ZHZLbpGGYSe3duYzaNTtZK/AOQfqtYLUEW5LfbhSw3w=="
-      },
       "Serilog": {
         "type": "Direct",
         "requested": "[4.3.0, )",
