@@ -36,7 +36,9 @@ internal class Program
                 await Task.Delay(250);
             if (!File.Exists("stopped")) lease.Proxy.Stop();
             Lease.Recover(path, lease.Proxy);
-            if (lease.StopServer) lease.Server.Stop();
+            // A live session owner stops the server itself with a clean shutdown that saves the players.
+            // Killing it here as soon as the proxy ended lost the progress since the last periodic save.
+            if (lease.StopServer && !lease.Owner.Alive) lease.Server.Stop();
             return 0;
         }
         catch (Exception ex)
@@ -187,6 +189,19 @@ internal class Program
         }
     }
 
+    // The server saves its players and exits when shutdown.request appears in its working directory
+    // (tools/dev/server.ps1 stop does the same); it is killed only if that does not happen in time.
+    static void StopServerCleanly(ProcessRef server, string directory)
+    {
+        if (!server.Alive) return;
+        var request = Path.Combine(directory, "shutdown.request");
+        try { File.WriteAllText(request, ""); } catch (IOException) { }
+        var until = DateTime.UtcNow.AddSeconds(60);
+        while (server.Alive && DateTime.UtcNow < until) Thread.Sleep(250);
+        server.Stop();
+        try { File.Delete(request); } catch (IOException) { }
+    }
+
     // Starts BEFORE the server. Covers a killed Play process during slow server startup.
     static async Task<int> WatchSession(string directory, int ownerPid, string serverRecord)
     {
@@ -213,7 +228,7 @@ internal class Program
             if (File.Exists("owns-server") && File.Exists(serverRecord))
             {
                 var server = JsonSerializer.Deserialize<ProcessRef>(File.ReadAllText(serverRecord))!;
-                if (server.Started >= owner.Started) server.Stop();
+                if (server.Started >= owner.Started) StopServerCleanly(server, Path.GetDirectoryName(Path.GetFullPath(serverRecord))!);
             }
             File.WriteAllText("session-watch.stopped", DateTimeOffset.UtcNow.ToString("O"));
         }
