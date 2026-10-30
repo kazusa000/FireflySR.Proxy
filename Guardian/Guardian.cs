@@ -9,7 +9,10 @@ internal class Program
 {
     static async Task<int> Main(string[] args)
     {
-        if ((args.Length == 3 || args.Length == 4) && args[0] == "--client") return await RunClient(args[1], args[2], args.Length == 4 ? int.Parse(args[3]) : 0);
+        // Optional 5th/6th arguments: a background desktop name and the game's command line (automated client tests).
+        if (args.Length is >= 3 and <= 6 && args[0] == "--client")
+            return await RunClient(args[1], args[2], args.Length >= 4 ? int.Parse(args[3]) : 0,
+                args.Length >= 5 ? args[4] : "", args.Length == 6 ? args[5] : "");
         if (args.Length == 3 && args[0] == "--trust-watch") return await WatchTrust(args[1], int.Parse(args[2]));
         if (args.Length == 4 && args[0] == "--session") return await WatchSession(args[1], int.Parse(args[2]), args[3]);
         if (args.Length == 2 && args[0] == "--recover")
@@ -50,8 +53,9 @@ internal class Program
 
     // Elevated only as the game's startup helper; server/proxy stay unelevated.
     // A '-' game path performs certificate/session preparation for integration tests.
-    static async Task<int> RunClient(string leasePath, string gamePath, int probeSeconds)
+    static async Task<int> RunClient(string leasePath, string gamePath, int probeSeconds, string desktopName, string gameArguments)
     {
+        using var desktop = desktopName.Length > 0 ? new DesktopLaunch(desktopName) : null;
         string path = Path.GetFullPath(leasePath);
         Directory.SetCurrentDirectory(Path.GetDirectoryName(path)!);
         Lease? lease = null;
@@ -105,8 +109,18 @@ internal class Program
                 gameStart.Environment["HTTPS_PROXY"] = endpoint;
                 gameStart.Environment["ALL_PROXY"] = endpoint;
                 gameStart.Environment["NO_PROXY"] = "localhost,127.0.0.1,::1";
-                using var p = Process.Start(gameStart) ?? throw new Exception("Game start failed");
-                game = ProcessRef.Capture(p.Id);
+                foreach (var argument in gameArguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)) gameStart.ArgumentList.Add(argument);
+                if (desktop != null)
+                {
+                    var overrides = gameStart.Environment.Where(x => x.Value != null && Environment.GetEnvironmentVariable(x.Key) != x.Value)
+                        .ToDictionary(x => x.Key, x => x.Value!);
+                    game = ProcessRef.Capture(desktop.Start(gameStart.FileName, gameStart.ArgumentList, overrides));
+                }
+                else
+                {
+                    using var p = Process.Start(gameStart) ?? throw new Exception("Game start failed");
+                    game = ProcessRef.Capture(p.Id);
+                }
                 File.WriteAllText("game.json", JsonSerializer.Serialize(game));
             }
             var probeUntil = probeSeconds > 0 ? DateTime.UtcNow.AddSeconds(probeSeconds) : DateTime.MaxValue;
