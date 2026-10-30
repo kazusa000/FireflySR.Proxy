@@ -13,6 +13,7 @@ This fork replaces the interactive standalone proxy lifecycle with a project-own
 - No credentials or query strings in redirect logs.
 - Child-only Unity/curl proxy environment for the elevated game; no persistent environment changes.
 - Disabled upstream prefetch before rewriting, so local requests do not wait on official TLS.
+- Optional background desktop for the game (automated client tests): the elevated helper creates it and starts the unchanged game there.
 - .NET 9 projects and NuGet lock files; build artifacts directed by the parent project's portable build wrapper.
 
 Use the parent project's tools/dev/build-proxy.ps1 and tools/dev/Play.ps1, not upstream compile.bat. Runtime data and private keys do not belong in this repository. Original license and upstream history are retained.
