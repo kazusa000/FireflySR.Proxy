@@ -64,6 +64,7 @@ internal class Program
             lease = JsonSerializer.Deserialize<Lease>(File.ReadAllText(path))!;
             if (!lease.Proxy.Alive || !lease.Owner.Alive || !lease.Server.Alive) throw new Exception("Session no longer exists");
             File.WriteAllText("client-helper.json", JsonSerializer.Serialize(ProcessRef.Capture(Environment.ProcessId)));
+            StopDesktopGame();
             var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
             start.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "Guardian.dll"));
             start.ArgumentList.Add("--trust-watch");
@@ -115,6 +116,7 @@ internal class Program
                     var overrides = gameStart.Environment.Where(x => x.Value != null && Environment.GetEnvironmentVariable(x.Key) != x.Value)
                         .ToDictionary(x => x.Key, x => x.Value!);
                     game = ProcessRef.Capture(desktop.Start(gameStart.FileName, gameStart.ArgumentList, overrides));
+                    File.WriteAllText("desktop-game.json", JsonSerializer.Serialize(game));
                 }
                 else
                 {
@@ -122,6 +124,11 @@ internal class Program
                     game = ProcessRef.Capture(p.Id);
                 }
                 File.WriteAllText("game.json", JsonSerializer.Serialize(game));
+                if (desktop != null)
+                {
+                    var started = game;
+                    new DesktopInput(desktop.Name, () => started.Id).Start(() => started.Alive && !File.Exists("stop"));
+                }
             }
             var probeUntil = probeSeconds > 0 ? DateTime.UtcNow.AddSeconds(probeSeconds) : DateTime.MaxValue;
             var nextSnapshot = DateTime.UtcNow.AddSeconds(15);
@@ -158,6 +165,7 @@ internal class Program
         finally
         {
             File.WriteAllText("stop", "client session ended");
+            StopDesktopGame();
             if (lease != null && !lease.PreviouslyTrusted)
             {
                 try { lease.RemoveTrust(); }
@@ -165,6 +173,20 @@ internal class Program
             }
             File.WriteAllText("client-helper.stopped", DateTimeOffset.UtcNow.ToString("O"));
         }
+    }
+
+    // A game on the test desktop cannot be reached or closed by the user, and the unelevated tools may not stop it,
+    // so the elevated helper ends it with the session, and at the next session if a previous helper could not.
+    static void StopDesktopGame()
+    {
+        if (!File.Exists("desktop-game.json")) return;
+        try
+        {
+            var game = JsonSerializer.Deserialize<ProcessRef>(File.ReadAllText("desktop-game.json"))!;
+            game.Stop();
+            if (!game.Alive) File.Delete("desktop-game.json");
+        }
+        catch (Exception ex) { File.AppendAllText("client-helper-error.log", "Desktop game: " + ex + Environment.NewLine); }
     }
 
     static string CaptureStartup(ProcessRef game)
