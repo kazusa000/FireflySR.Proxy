@@ -10,6 +10,7 @@ internal class Program
     static async Task<int> Main(string[] args)
     {
         // Optional 5th/6th arguments: a background desktop name and the game's command line (automated client tests).
+        // The desktop name "Default" keeps the game on the user's own desktop, where they can watch it.
         if (args.Length is >= 3 and <= 6 && args[0] == "--client")
             return await RunClient(args[1], args[2], args.Length >= 4 ? int.Parse(args[3]) : 0,
                 args.Length >= 5 ? args[4] : "", args.Length == 6 ? args[5] : "");
@@ -53,9 +54,11 @@ internal class Program
 
     // Elevated only as the game's startup helper; server/proxy stay unelevated.
     // A '-' game path performs certificate/session preparation for integration tests.
+    const string OwnDesktop = "Default";
+
     static async Task<int> RunClient(string leasePath, string gamePath, int probeSeconds, string desktopName, string gameArguments)
     {
-        using var desktop = desktopName.Length > 0 ? new DesktopLaunch(desktopName) : null;
+        using var desktop = desktopName.Length > 0 && desktopName != OwnDesktop ? new DesktopLaunch(desktopName) : null;
         string path = Path.GetFullPath(leasePath);
         Directory.SetCurrentDirectory(Path.GetDirectoryName(path)!);
         Lease? lease = null;
@@ -122,12 +125,14 @@ internal class Program
                 {
                     using var p = Process.Start(gameStart) ?? throw new Exception("Game start failed");
                     game = ProcessRef.Capture(p.Id);
+                    // An automated test game on the user's desktop also ends with the session (the tools are unelevated).
+                    if (desktopName == OwnDesktop) File.WriteAllText("desktop-game.json", JsonSerializer.Serialize(game));
                 }
                 File.WriteAllText("game.json", JsonSerializer.Serialize(game));
-                if (desktop != null)
+                if (desktopName.Length > 0)
                 {
                     var started = game;
-                    new DesktopInput(desktop.Name, () => started.Id).Start(() => started.Alive && !File.Exists("stop"));
+                    new DesktopInput(desktop?.Name ?? desktopName, () => started.Id).Start(() => started.Alive && !File.Exists("stop"));
                 }
             }
             var probeUntil = probeSeconds > 0 ? DateTime.UtcNow.AddSeconds(probeSeconds) : DateTime.MaxValue;
