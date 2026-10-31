@@ -25,6 +25,8 @@ internal sealed class DesktopInput
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int processId);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder name, int size);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
@@ -115,6 +117,13 @@ internal sealed class DesktopInput
     {
         var hwnd = FindWindow(desktop);
         if (hwnd == IntPtr.Zero) return "error: no game window on the test desktop";
+        // A minimized game has no client area and pauses itself; on the user's desktop bring it back without taking
+        // focus (SW_SHOWNOACTIVATE). Only this elevated helper can: the game runs as administrator.
+        if (IsIconic(hwnd))
+        {
+            ShowWindow(hwnd, 4);
+            Thread.Sleep(500);
+        }
         GetClientRect(hwnd, out var rect);
         switch (command.Op)
         {
