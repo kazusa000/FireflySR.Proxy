@@ -14,6 +14,7 @@ internal sealed class DesktopInput
 
     const uint WmMouseMove = 0x0200, WmLButtonDown = 0x0201, WmLButtonUp = 0x0202, WmChar = 0x0102;
     const uint WmKeyDown = 0x0100, WmKeyUp = 0x0101;
+    const uint WmActivate = 0x0006, WmSetFocus = 0x0007, WmKillFocus = 0x0008, WmActivateApp = 0x001C;
 
     delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -130,11 +131,22 @@ internal sealed class DesktopInput
             case "capture":
                 return Capture(hwnd, rect.Right - rect.Left, rect.Bottom - rect.Top, command.File);
             case "click":
+                // On the user's desktop the game is not the active window and ignores mouse messages (the title
+                // screen's tap to enter, the SDK quit dialog). Tell it it is active for the click only, without
+                // SetForegroundWindow, so the user's own window keeps focus, then tell it it is inactive again.
+                PostMessageW(hwnd, WmActivateApp, 1, IntPtr.Zero);
+                PostMessageW(hwnd, WmActivate, 1, IntPtr.Zero);
+                PostMessageW(hwnd, WmSetFocus, IntPtr.Zero, IntPtr.Zero);
+                Thread.Sleep(150);
                 PostMessageW(hwnd, WmMouseMove, IntPtr.Zero, Point(command.X, command.Y));
                 Thread.Sleep(50);
                 PostMessageW(hwnd, WmLButtonDown, 1, Point(command.X, command.Y));
                 Thread.Sleep(80);
                 PostMessageW(hwnd, WmLButtonUp, IntPtr.Zero, Point(command.X, command.Y));
+                Thread.Sleep(250);
+                PostMessageW(hwnd, WmKillFocus, IntPtr.Zero, IntPtr.Zero);
+                PostMessageW(hwnd, WmActivate, IntPtr.Zero, IntPtr.Zero);
+                PostMessageW(hwnd, WmActivateApp, IntPtr.Zero, IntPtr.Zero);
                 return $"clicked {command.X},{command.Y} in {rect.Right}x{rect.Bottom}";
             case "text":
                 foreach (var c in command.Text) { PostMessageW(hwnd, WmChar, c, 1); Thread.Sleep(40); }
