@@ -32,6 +32,15 @@ internal sealed class DesktopInput
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] static extern uint MapVirtualKeyW(uint code, uint mapType);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out PointStruct point);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hwnd, ref PointStruct point);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, IntPtr extra);
     [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
     [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
@@ -42,6 +51,7 @@ internal sealed class DesktopInput
     [DllImport("gdi32.dll")] static extern int GetDIBits(IntPtr hdc, IntPtr bitmap, uint start, uint lines, byte[] bits, ref BitmapInfo info, uint usage);
 
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct PointStruct { public int X, Y; }
 
     [StructLayout(LayoutKind.Sequential)]
     struct BitmapInfo
@@ -114,6 +124,31 @@ internal sealed class DesktopInput
 
     static IntPtr Point(int x, int y) => (IntPtr)((y << 16) | (x & 0xFFFF));
 
+    // SetForegroundWindow is refused to a background process unless it shares the foreground thread's input state.
+    static bool Foreground(IntPtr hwnd)
+    {
+        var self = GetCurrentThreadId();
+        var current = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+        var attached = current != 0 && current != self && AttachThreadInput(self, current, true);
+        try
+        {
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+        finally { if (attached) AttachThreadInput(self, current, false); }
+        Thread.Sleep(100);
+        return GetForegroundWindow() == hwnd;
+    }
+
+    void PostClick(IntPtr hwnd, Command command)
+    {
+        PostMessageW(hwnd, WmMouseMove, IntPtr.Zero, Point(command.X, command.Y));
+        Thread.Sleep(50);
+        PostMessageW(hwnd, WmLButtonDown, 1, Point(command.X, command.Y));
+        Thread.Sleep(80);
+        PostMessageW(hwnd, WmLButtonUp, IntPtr.Zero, Point(command.X, command.Y));
+    }
+
     string Run(IntPtr desktop, Command command)
     {
         var hwnd = FindWindow(desktop);
@@ -138,16 +173,35 @@ internal sealed class DesktopInput
                 PostMessageW(hwnd, WmActivate, 1, IntPtr.Zero);
                 PostMessageW(hwnd, WmSetFocus, IntPtr.Zero, IntPtr.Zero);
                 Thread.Sleep(150);
-                PostMessageW(hwnd, WmMouseMove, IntPtr.Zero, Point(command.X, command.Y));
-                Thread.Sleep(50);
-                PostMessageW(hwnd, WmLButtonDown, 1, Point(command.X, command.Y));
-                Thread.Sleep(80);
-                PostMessageW(hwnd, WmLButtonUp, IntPtr.Zero, Point(command.X, command.Y));
+                PostClick(hwnd, command);
                 Thread.Sleep(250);
                 PostMessageW(hwnd, WmKillFocus, IntPtr.Zero, IntPtr.Zero);
                 PostMessageW(hwnd, WmActivate, IntPtr.Zero, IntPtr.Zero);
                 PostMessageW(hwnd, WmActivateApp, IntPtr.Zero, IntPtr.Zero);
                 return $"clicked {command.X},{command.Y} in {rect.Right}x{rect.Bottom}";
+            case "focusclick":
+                // The title screen's tap to enter takes real input only (posted messages are ignored even while the
+                // game is in front). Bring the game to the front, click it with the cursor briefly on the point, then
+                // put the cursor back and give the foreground back to the window the user had.
+                var previous = GetForegroundWindow();
+                var front = Foreground(hwnd);
+                Thread.Sleep(300);
+                if (front)
+                {
+                    GetCursorPos(out var cursor);
+                    var at = new PointStruct { X = command.X, Y = command.Y };
+                    ClientToScreen(hwnd, ref at);
+                    SetCursorPos(at.X, at.Y);
+                    Thread.Sleep(80);
+                    mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
+                    Thread.Sleep(80);
+                    mouse_event(0x0004, 0, 0, 0, IntPtr.Zero);
+                    Thread.Sleep(150);
+                    SetCursorPos(cursor.X, cursor.Y);
+                    Thread.Sleep(200);
+                }
+                var back = previous == IntPtr.Zero || previous == hwnd || Foreground(previous);
+                return $"focus-clicked {command.X},{command.Y} in {rect.Right}x{rect.Bottom} front={front} back={back}";
             case "text":
                 foreach (var c in command.Text) { PostMessageW(hwnd, WmChar, c, 1); Thread.Sleep(40); }
                 return $"typed {command.Text.Length} characters";
